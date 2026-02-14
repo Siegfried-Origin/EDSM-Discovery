@@ -8,30 +8,48 @@ import os
 from datetime import datetime, timedelta, UTC
 from tqdm import tqdm
 from dotenv import load_dotenv
+from pathlib import Path
 
 # ==============================
 # CONFIGURATION
 # ==============================
 
-load_dotenv()
-
-COMMANDER = os.getenv("COMMANDER")
-API_KEY   = os.getenv("API_KEY")
-
-if not COMMANDER or not API_KEY:
-    raise ValueError("COMMANDER or API_KEY missing in .env file")
-
+ENV_FILE    = Path(".env")
 LOGS_URL    = "https://www.edsm.net/api-logs-v1/get-logs"
 TRAFFIC_URL = "https://www.edsm.net/api-system-v1/traffic"
 
-LOG_RATE_DELAY = 0.4
-TRAFFIC_DELAY  = 0.4
 
-DISCOVERY_CACHE_FILE = "first_discoveries_cache.json"
-TRAFFIC_CACHE_FILE   = "traffic_cache.json"
-OUTPUT_FILE          = "edsm_first_discoveries_traffic.csv"
+def create_env_file():
+    print("🔧 First execution detected.")
+    print("Please enter your EDSM credentials.\n")
+    print("Visit https://www.edsm.net/en/settings/api to get your credentials.\n")
 
-SAFETY_WEEKS = 2  # Always refresh last two weeks
+    commander = input("Commander Name: ").strip()
+    api_key = input("API Key: ").strip()
+
+    if not commander or not api_key:
+        raise ValueError("Commander and API key cannot be empty.")
+
+    with open(ENV_FILE, "w", encoding="utf-8") as f:
+        f.write(f"COMMANDER={commander}\n")
+        f.write(f"API_KEY={api_key}\n")
+
+    print("\n✅ .env file created successfully.\n")
+
+
+def load_config():
+    if not ENV_FILE.exists():
+        create_env_file()
+
+    load_dotenv()
+
+    commander = os.getenv("COMMANDER")
+    api_key = os.getenv("API_KEY")
+
+    if not commander or not api_key:
+        raise RuntimeError("Invalid .env configuration.")
+
+    return commander, api_key
 
 
 # ==============================
@@ -78,10 +96,6 @@ def interval_key(start):
     return start.strftime("%Y-%m-%d")
 
 
-START_DATE = utc_datetime(2025, 1, 1)
-END_DATE = utc_now()
-
-
 # ==============================
 # CACHE HELPERS
 # ==============================
@@ -100,10 +114,10 @@ def save_cache(filename, data):
 # FIRST DISCOVERIES
 # ==============================
 
-def get_first_discoveries(start, end):
+def get_first_discoveries(commander, api_key, start, end):
     params = {
-        "commanderName": COMMANDER,
-        "apiKey": API_KEY,
+        "commanderName": commander,
+        "apiKey": api_key,
         "startDateTime": format_edsm_datetime(start),
         "endDateTime": format_edsm_datetime(end),
         "showId": 1
@@ -133,8 +147,8 @@ def get_first_discoveries(start, end):
 # SMART DISCOVERY CACHE SYSTEM
 # ==============================
 
-def update_discoveries_cache(start_date, end_date):
-    cache = load_cache(DISCOVERY_CACHE_FILE)
+def update_discoveries_cache(commander, api_key, start_date, end_date, safety_weeks, cache_file):
+    cache = load_cache(cache_file)
 
     if not cache:
         cache = {
@@ -144,7 +158,7 @@ def update_discoveries_cache(start_date, end_date):
         }
 
     # for safety, always refresh the last few weeks to catch any late updates
-    safe_start = align_to_monday(end_date - timedelta(days=7 * SAFETY_WEEKS))
+    safe_start = align_to_monday(end_date - timedelta(days=7*safety_weeks))
     for start, _ in generate_stable_week_intervals(safe_start, end_date):
         cache["intervals"].pop(interval_key(start), None)
 
@@ -160,7 +174,7 @@ def update_discoveries_cache(start_date, end_date):
         if key not in cache["intervals"]:
             intervals_to_fetch.append((start, end, key))
 
-    print(f"🔎 {len(intervals_to_fetch)} interval(s) to fetch.")
+    print(f"🔎 {len(intervals_to_fetch)} interval(s) to fetch...")
 
     # Avoid abuse of the API if we have a lot of intervals to fetch
     if len(intervals_to_fetch) > 360:
@@ -169,8 +183,8 @@ def update_discoveries_cache(start_date, end_date):
     else:
         request_log_delay = 0.4
 
-    for start, end, key in tqdm(intervals_to_fetch, desc="Fetching intervals"):
-        discoveries = get_first_discoveries(start, end)
+    for start, end, key in tqdm(intervals_to_fetch):
+        discoveries = get_first_discoveries(commander, api_key, start, end)
 
         for sys_id, name, date in discoveries:
             if sys_id in cache["systems"]:
@@ -187,118 +201,109 @@ def update_discoveries_cache(start_date, end_date):
             "fetched_at": utc_now().isoformat()
         }
 
-        save_cache(DISCOVERY_CACHE_FILE, cache)
+        save_cache(cache_file, cache)
         time.sleep(request_log_delay)
 
     print(f"\n✅ Total: systems first discovered : {len(cache['systems'])}")
 
     return cache["systems"]
 
-print("📡 Loading cache discoveries...")
-discoveries_cache = update_discoveries_cache(START_DATE, END_DATE)
-
-if not discoveries_cache:
-    print("🔍 Seeking first discoveries...")
-
-    current = START_DATE
-    all_systems = {}
-
-    while current < END_DATE:
-        week_end = current + timedelta(days=7)
-        discoveries = get_first_discoveries(current, week_end)
-
-        for sys_id, name, date in discoveries:
-            if sys_id not in all_systems:
-                all_systems[sys_id] = {
-                    "name": name,
-                    "firstDiscoveryDate": date
-                }
-
-        current = week_end
-        time.sleep(LOG_RATE_DELAY)
-
-    discoveries_cache = all_systems
-    save_cache(DISCOVERY_CACHE_FILE, discoveries_cache)
-
-print(f"✅ Loaded {len(discoveries_cache)} system(s) first discovered.")
-
 
 # ==============================
 # TRAFFIC ANALYSIS
 # ==============================
-
-traffic = {}
 
 def get_traffic(system_id):
     r = requests.get(TRAFFIC_URL, params={"systemId": system_id})
     data = r.json()
     return data
 
-print("🚦 Analysing trafic...")
 
-for sys_id in tqdm(discoveries_cache.keys()):
-    try:
-        data = get_traffic(sys_id)
+def main():
+    COMMANDER, API_KEY = load_config()
 
-        traffic[sys_id] = {
-            "total": data.get("traffic", {}).get("total", 0),
-            "week": data.get("traffic", {}).get("week", 0),
-            "day": data.get("traffic", {}).get("day", 0),
-            "breakdown": data.get("breakdown", {})
-        }
+    if not COMMANDER or not API_KEY:
+        raise ValueError("COMMANDER or API_KEY missing in .env file")
 
-        save_cache(TRAFFIC_CACHE_FILE, traffic)
-        time.sleep(TRAFFIC_DELAY)
+    TRAFFIC_DELAY  = 0.4
 
-    except Exception as e:
-        print("Error:", e)
-        break
+    DISCOVERY_CACHE_FILE = "first_discoveries_cache.json"
+    OUTPUT_FILE          = "edsm_first_discoveries_traffic.csv"
 
-print("✅ Analysing trafic completed.")
+    SAFETY_WEEKS = 2  # Always refresh last two weeks
 
-# ==============================
-# EXPORT CSV
-# ==============================
+    START_DATE = utc_datetime(2026, 1, 1)
+    END_DATE = utc_now()
 
-results = []
+    print("📡 Loading cache discoveries...")
+    discoveries_cache = update_discoveries_cache(COMMANDER, API_KEY, START_DATE, END_DATE, SAFETY_WEEKS, DISCOVERY_CACHE_FILE)
 
-for sys_id, info in discoveries_cache.items():
-    traffic_info = traffic.get(sys_id, {})
-    total = traffic_info.get("total", 0)
+    print(f"✅ Loaded {len(discoveries_cache)} system(s) first discovered.")
 
-    results.append({
-        "systemName": info["name"],
-        "systemId": sys_id,
-        "firstDiscoveryDate": info["firstDiscoveryDate"],
-        "totalTraffic": total,
-        "trafficWeek": traffic_info.get("week", 0),
-        "trafficDay": traffic_info.get("day", 0),
-        "visitedAfterDiscovery": total > 1
-    })
+    traffic = {}
 
-# Tri décroissant par trafic
-results_sorted = sorted(results, key=lambda x: x["totalTraffic"], reverse=True)
+    print("🚦 Analysing trafic...")
 
-with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as csvfile:
-    fieldnames = results_sorted[0].keys()
-    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-    writer.writeheader()
-    writer.writerows(results_sorted)
+    for sys_id in tqdm(discoveries_cache.keys()):
+        try:
+            data = get_traffic(sys_id)
 
-print(f"\n💾 Export CSV done: {OUTPUT_FILE}")
+            traffic[sys_id] = {
+                "total": data.get("traffic", {}).get("total", 0),
+                "week": data.get("traffic", {}).get("week", 0),
+                "day": data.get("traffic", {}).get("day", 0),
+                "breakdown": data.get("breakdown", {})
+            }
 
-# ==============================
-# STATS
-# ==============================
+            time.sleep(TRAFFIC_DELAY)
 
-never = sum(1 for r in results if r["totalTraffic"] <= 1)
+        except Exception as e:
+            print("Error:", e)
+            break
 
-print("\n📊 STATISTICS")
-print(f"Total systems         : {len(results)}")
-print(f"Never revisited       : {never}")
-print(f"Revisited             : {len(results) - never}")
-print(f"Intacts (%)           : {round((never/len(results))*100, 2)}%")
+    print("✅ Analysing trafic completed.")
 
-print("\n🏆 TOP 10 most visited systems:")
-for r in results_sorted[:10]:
-    print(f"{r['systemName']} → {r['totalTraffic']} visits")
+    # EXPORT CSV
+    results = []
+
+    for sys_id, info in discoveries_cache.items():
+        traffic_info = traffic.get(sys_id, {})
+        total = traffic_info.get("total", 0)
+
+        results.append({
+            "systemName": info["name"],
+            "systemId": sys_id,
+            "firstDiscoveryDate": info["firstDiscoveryDate"],
+            "totalTraffic": total,
+            "trafficWeek": traffic_info.get("week", 0),
+            "trafficDay": traffic_info.get("day", 0),
+            "visitedAfterDiscovery": total > 1
+        })
+
+    # Sort most visited first discoveries
+    results_sorted = sorted(results, key=lambda x: x["totalTraffic"], reverse=True)
+
+    with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as csvfile:
+        fieldnames = results_sorted[0].keys()
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results_sorted)
+
+    print(f"\n💾 Export CSV done: {OUTPUT_FILE}")
+
+    # STATS
+    never = sum(1 for r in results if r["totalTraffic"] <= 1)
+
+    print("\n📊 STATISTICS")
+    print(f"Total systems         : {len(results)}")
+    print(f"Never revisited       : {never}")
+    print(f"Revisited             : {len(results) - never}")
+    print(f"Intacts (%)           : {round((never/len(results))*100, 2)}%")
+
+    print("\n🏆 TOP 10 most visited systems:")
+    for r in results_sorted[:10]:
+        print(f"{r['systemName']} → {r['totalTraffic']} visits")
+
+
+if __name__ == '__main__':
+    main()
