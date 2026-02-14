@@ -92,8 +92,35 @@ def format_edsm_datetime(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def parse_edsm_datetime(date_str: str) -> datetime:
+    return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+
+
 def interval_key(start):
     return start.strftime("%Y-%m-%d")
+
+
+def prompt_start_date(default_date=None):
+    while True:
+        prompt_text = "Start date (YYYY-MM-DD)"
+        if default_date:
+            prompt_text += f" [default: {default_date.date()}]"
+        prompt_text += ": "
+
+        user_input = input(prompt_text).strip()
+
+        if not user_input:
+            if default_date:
+                return default_date
+            print("A date is required.")
+            continue
+
+        try:
+            dt = datetime.strptime(user_input, "%Y-%m-%d")
+            return dt.replace(tzinfo=UTC)
+
+        except ValueError:
+            print("❌ Invalid format. Please use YYYY-MM-DD.")
 
 
 # ==============================
@@ -232,7 +259,7 @@ def main():
 
     SAFETY_WEEKS = 2  # Always refresh last two weeks
 
-    START_DATE = utc_datetime(2026, 1, 1)
+    START_DATE = prompt_start_date(utc_datetime(2026, 1, 1))
     END_DATE = utc_now()
 
     print("📡 Loading cache discoveries...")
@@ -240,11 +267,22 @@ def main():
 
     print(f"✅ Loaded {len(discoveries_cache)} system(s) first discovered.")
 
+    # Remove from cache systems discovered before the specified starting date
+    filtered_cache = {}
+
+    for sys_id, system_data in discoveries_cache.items():
+        discovery_dt = parse_edsm_datetime(system_data["firstDiscoveryDate"])
+
+        if discovery_dt >= START_DATE:
+            filtered_cache[sys_id] = system_data
+
+    discoveries_cache = filtered_cache
+
     traffic = {}
 
     print("🚦 Analysing trafic...")
 
-    for sys_id in tqdm(discoveries_cache.keys()):
+    for sys_id in tqdm(filtered_cache.items()):
         try:
             data = get_traffic(sys_id)
 
@@ -266,7 +304,7 @@ def main():
     # EXPORT CSV
     results = []
 
-    for sys_id, info in discoveries_cache.items():
+    for sys_id, info in filtered_cache.items():
         traffic_info = traffic.get(sys_id, {})
         total = traffic_info.get("total", 0)
 
