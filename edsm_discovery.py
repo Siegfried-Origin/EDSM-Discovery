@@ -5,7 +5,7 @@ import csv
 import time
 import json
 import os
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, timezone
 from tqdm import tqdm
 from dotenv import load_dotenv
 from pathlib import Path
@@ -57,17 +57,17 @@ def load_config():
 # ==============================
 
 def utc_now():
-    return datetime.now(UTC)
+    return datetime.now(timezone.utc)
 
 
 def make_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=UTC)
-    return dt.astimezone(UTC)
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def utc_datetime(year, month, day, hour=0, minute=0, second=0):
-    return datetime(year, month, day, hour, minute, second, tzinfo=UTC)
+    return datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
 
 
 def align_to_monday(dt):
@@ -93,7 +93,7 @@ def format_edsm_datetime(dt: datetime) -> str:
 
 
 def parse_edsm_datetime(date_str: str) -> datetime:
-    return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+    return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
 
 
 def interval_key(start):
@@ -117,7 +117,7 @@ def prompt_start_date(default_date=None):
 
         try:
             dt = datetime.strptime(user_input, "%Y-%m-%d")
-            return dt.replace(tzinfo=UTC)
+            return dt.replace(tzinfo=timezone.utc)
 
         except ValueError:
             print("❌ Invalid format. Please use YYYY-MM-DD.")
@@ -276,13 +276,12 @@ def main():
         if discovery_dt >= START_DATE:
             filtered_cache[sys_id] = system_data
 
-    discoveries_cache = filtered_cache
+    print(f"✅ {len(filtered_cache)} system(s) discovered after {START_DATE.date()}.")
 
     traffic = {}
-
     print("🚦 Analysing trafic...")
 
-    for sys_id in tqdm(filtered_cache.items()):
+    for sys_id, info in tqdm(filtered_cache.items()):
         try:
             data = get_traffic(sys_id)
 
@@ -296,7 +295,7 @@ def main():
             time.sleep(TRAFFIC_DELAY)
 
         except Exception as e:
-            print("Error:", e)
+            print("Error:", e, sys_id)
             break
 
     print("✅ Analysing trafic completed.")
